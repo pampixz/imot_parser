@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 import datetime
 import re
 import logging
-from typing import List, Dict, Optional, Union
+from typing import List, Dict, Optional
 
 # Настройка логирования
 logging.basicConfig(
@@ -50,6 +50,7 @@ class ExcelExporter:
             query += " AND LOWER(title) LIKE :apartment_type"
             params["apartment_type"] = f"%{filters['apartment_type'].lower()}%"
 
+        # Дополнительные фильтры, если нужно:
         if filters.get("min_area"):
             try:
                 params["min_area"] = float(filters["min_area"])
@@ -122,10 +123,8 @@ class ExcelExporter:
         if "scraped_date" in df.columns:
             df["scraped_date"] = pd.to_datetime(df["scraped_date"]).dt.strftime("%Y-%m-%d")
 
-        # Удаление слова "Продава" из начала title
         if "title" in df.columns:
             df["title"] = df["title"].str.replace(r"^Продава\s*", "", regex=True)
-            # Переименование столбцов на русский
             df = df.rename(columns={
                 "title": "Тип недвижемости",
                 "price": "Цена",
@@ -150,7 +149,8 @@ class ExcelExporter:
         city: str,
         district: str,
         listings: Optional[List[Dict]] = None,
-        filters: Optional[dict] = None
+        filters: Optional[dict] = None,
+        keyword: Optional[str] = None  # 👈 добавлено
     ) -> str:
         """Экспорт данных в Excel файл"""
         logger.info(f"📤 Начало экспорта: город={city}, район={district}")
@@ -159,20 +159,20 @@ class ExcelExporter:
             raise ValueError("Параметры 'city' и 'district' обязательны")
 
         try:
-            # Получаем данные
             if listings is not None:
                 df = pd.DataFrame(listings)
                 if df.empty:
                     raise ValueError("Передан пустой список объявлений")
             else:
+                filters = filters or {}
+                if keyword and keyword.lower() != "all":
+                    filters["apartment_type"] = keyword
                 df = self.get_data_from_db(city, district, filters)
                 if df.empty:
                     raise ValueError("Нет данных для экспорта")
 
-            # Подготовка данных
             df = self.prepare_dataframe(df)
 
-            # Создание директории и имени файла
             os.makedirs("exports", exist_ok=True)
             safe_city = self.sanitize_filename(city)
             safe_district = self.sanitize_filename(district)
@@ -180,25 +180,23 @@ class ExcelExporter:
             filename = f"{safe_city}_{safe_district}_{timestamp}.xlsx"
             filepath = os.path.join("exports", filename)
 
-            # Экспорт в Excel
             df.to_excel(filepath, index=False, engine='openpyxl')
             logger.info(f"✅ Файл успешно сохранен: {filepath}")
-            print(f"Экспорт завершён: {filepath}")  # Для интеграции с ботом
+            print(f"Экспорт завершён: {filepath}")
             return filepath
 
         except Exception as e:
             logger.error(f"❌ Ошибка при экспорте: {str(e)}")
             raise
 
-def export_to_excel(city: str, district: str, listings: Optional[List[Dict]] = None, filters: Optional[dict] = None) -> str:
-    """Функция-обертка для совместимости"""
+def export_to_excel(city: str, district: str, listings: Optional[List[Dict]] = None, filters: Optional[dict] = None, keyword: Optional[str] = None) -> str:
+    """Функция-обертка"""
     exporter = ExcelExporter()
-    return exporter.export_to_excel(city, district, listings, filters)
+    return exporter.export_to_excel(city, district, listings, filters, keyword)
 
 if __name__ == "__main__":
-    # Пример использования
     try:
-        result = export_to_excel("sofia", "lyulin-5")
+        result = export_to_excel("sofia", "lyulin-5", keyword="3-СТАЕН")
         print(f"Файл создан: {result}")
     except Exception as e:
         print(f"Ошибка: {str(e)}")

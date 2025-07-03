@@ -28,9 +28,8 @@ if not BOT_TOKEN:
     logger.critical("❌ BOT_TOKEN не найден в .env")
     raise ValueError("BOT_TOKEN не найден в .env")
 
-SELECTING_ACTION, SELECTING_DISTRICT = range(2)
+SELECTING_ACTION, SELECTING_DISTRICT, SELECTING_PROPERTY_TYPE = range(3)
 
-# Команда /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user = update.effective_user
     logger.info(f"/start от {user.id}")
@@ -52,7 +51,6 @@ async def show_action_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, u
 
     return SELECTING_ACTION
 
-# Выбор района
 async def select_district(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
@@ -66,22 +64,37 @@ async def select_district(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await query.edit_message_text("🏙 Выберите район:", reply_markup=InlineKeyboardMarkup(keyboard))
     return SELECTING_DISTRICT
 
-# Обработка района
 async def handle_district(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
 
     district = query.data
+    context.user_data["district"] = district
     mode = context.user_data.get("mode")
-    logger.info(f"Район выбран: {district} | Режим: {mode}")
 
-    loading_msg = await query.edit_message_text("⏳ Обработка...")
+    if mode == "from_cache":
+        keyboard = [
+            [InlineKeyboardButton("1-СТАЕН", callback_data="1-СТАЕН"),
+             InlineKeyboardButton("2-СТАЕН", callback_data="2-СТАЕН")],
+            [InlineKeyboardButton("3-СТАЕН", callback_data="3-СТАЕН"),
+             InlineKeyboardButton("4-СТАЕН", callback_data="4-СТАЕН")],
+            [InlineKeyboardButton("5-СТАЕН", callback_data="5-СТАЕН"),
+             InlineKeyboardButton("МНОГОСТАЕН", callback_data="МНОГОСТАЕН")],
+            [InlineKeyboardButton("ГАРАЖ", callback_data="ГАРАЖ")],
+            [InlineKeyboardButton("ВСЕ ТИПЫ", callback_data="all")]
+        ]
+        await query.edit_message_text(
+            "🏘 Выберите тип недвижимости:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return SELECTING_PROPERTY_TYPE
 
-    try:
-        if mode == "new_search":
-            await loading_msg.edit_text("🔍 Запускаю парсинг новых объявлений...")
-            logger.info(f"🚀 Запуск Scrapy: {sys.executable} {SPIDER_SCRIPT} sofia {district} true")
 
+    else:
+        loading_msg = await query.edit_message_text("🔍 Запускаю парсинг новых объявлений...")
+        logger.info(f"🚀 Запуск Scrapy: {sys.executable} {SPIDER_SCRIPT} sofia {district} true")
+
+        try:
             process = await asyncio.create_subprocess_exec(
                 sys.executable, SPIDER_SCRIPT, "sofia", district, "true",
                 stdout=asyncio.subprocess.PIPE,
@@ -109,33 +122,61 @@ async def handle_district(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             logger.info("✅ Паук успешно завершён.")
             await loading_msg.edit_text("✅ Парсинг завершён, формирую отчёт...")
 
-        else:
-            logger.info("📦 Режим: из базы, паук не запускается.")
-            await loading_msg.edit_text("📦 Получаю данные из базы...")
+            exporter = ExcelExporter()
+            export_path = exporter.export_to_excel("sofia", district)
 
+            if not export_path or not os.path.exists(export_path):
+                logger.warning("⚠️ Отчёт не создан.")
+                await loading_msg.edit_text("⚠️ Не удалось сформировать отчёт.")
+                return await offer_restart(update, context)
+
+            with open(export_path, "rb") as file:
+                await query.message.reply_document(
+                    document=file,
+                    filename=os.path.basename(export_path),
+                    caption=f"🏡 Результаты для района {district.replace('-', ' ').title()}"
+                )
+
+            return await offer_restart(update, context)
+
+        except Exception as e:
+            logger.exception("❌ Ошибка при парсинге:")
+            await loading_msg.edit_text(f"❌ Внутренняя ошибка: {str(e)}")
+            return ConversationHandler.END
+
+async def handle_property_type(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+
+    selected_type = query.data
+    district = context.user_data.get("district")
+    logger.info(f"🏘 Тип недвижимости: {selected_type} | Район: {district}")
+
+    msg = await query.edit_message_text("📦 Получаю данные из базы...")
+
+    try:
         exporter = ExcelExporter()
-        export_path = exporter.export_to_excel("sofia", district)
+        export_path = exporter.export_to_excel("sofia", district, keyword=None if selected_type == "all" else selected_type)
 
         if not export_path or not os.path.exists(export_path):
             logger.warning("⚠️ Отчёт не создан.")
-            await loading_msg.edit_text("⚠️ Не удалось сформировать отчёт.")
+            await msg.edit_text("⚠️ Не удалось сформировать отчёт.")
             return await offer_restart(update, context)
 
         with open(export_path, "rb") as file:
             await query.message.reply_document(
                 document=file,
                 filename=os.path.basename(export_path),
-                caption=f"🏡 Результаты для района {district.replace('-', ' ').title()}"
+                caption=f"🏡 Результаты ({selected_type}) для района {district.replace('-', ' ').title()}"
             )
 
         return await offer_restart(update, context)
 
     except Exception as e:
-        logger.exception("❌ Ошибка при обработке района:")
-        await loading_msg.edit_text(f"❌ Внутренняя ошибка: {str(e)}")
+        logger.exception("❌ Ошибка при обработке отчета:")
+        await msg.edit_text(f"❌ Внутренняя ошибка: {str(e)}")
         return ConversationHandler.END
 
-# Предложить новый запрос
 async def offer_restart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     keyboard = [[InlineKeyboardButton("🔄 Новый запрос", callback_data="restart")]]
     await update.callback_query.message.reply_text(
@@ -144,14 +185,12 @@ async def offer_restart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     )
     return SELECTING_ACTION
 
-# Обработка restart
 async def restart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.callback_query.answer()
     context.user_data.clear()
     user = update.effective_user
     return await show_action_menu(update, context, user)
 
-# Отмена
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if update.message:
         await update.message.reply_text("❌ Отменено.")
@@ -160,7 +199,6 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         await update.callback_query.message.reply_text("❌ Отменено.")
     return ConversationHandler.END
 
-# Обработка ошибок
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error("⚠️ Необработанная ошибка:", exc_info=context.error)
     try:
@@ -171,14 +209,12 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     except Exception as e:
         logger.error(f"Ошибка в error_handler: {e}")
 
-# Установка команд
 async def post_init(application):
     await application.bot.set_my_commands([
         ("start", "Начать работу"),
         ("cancel", "Отменить действие")
     ])
 
-# Основной запуск
 def main():
     application = ApplicationBuilder() \
         .token(BOT_TOKEN) \
@@ -192,7 +228,8 @@ def main():
                 CallbackQueryHandler(select_district, pattern="^(from_cache|new_search)$"),
                 CallbackQueryHandler(restart, pattern="^restart$")
             ],
-            SELECTING_DISTRICT: [CallbackQueryHandler(handle_district)]
+            SELECTING_DISTRICT: [CallbackQueryHandler(handle_district)],
+            SELECTING_PROPERTY_TYPE: [CallbackQueryHandler(handle_property_type)]
         },
         fallbacks=[CommandHandler("cancel", cancel)],
         per_message=False
